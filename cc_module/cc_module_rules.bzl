@@ -652,7 +652,7 @@ cc_module_library = rule(
         ),
         "deps": attr.label_list(
             allow_empty = True,
-            providers = [[CcInfo]],
+            providers = [[CcInfo], [CcInfo, ModuleInfo]],
             doc = """
             List of other C++ targets to depend on.
 
@@ -963,7 +963,7 @@ cc_module_binary = rule(
         ),
         "deps": attr.label_list(
             allow_empty = True,
-            providers = [CcInfo, ModuleInfo],
+            providers = [[CcInfo], [CcInfo, ModuleInfo]],
             doc = """
             List of other C++ targets to depend on.
 
