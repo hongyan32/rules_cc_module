@@ -40,9 +40,10 @@ bazel_dep(name = "rules_cc_module", dev_dependency = True)
 git_override(
     module_name = "rules_cc_module",
     remote = "https://github.com/hongyan32/rules_cc_module.git",
-    commit = "latest-commit-hash",
+    commit = "b39f033",
 )
 ```
+You may repalce commit attribute with latest-commit-hash 
 
 ### 2. Basic Usage
 
@@ -327,7 +328,7 @@ The code is designed to work with standard GCC/Clang module compilation flags, b
 
 ## License
 
-Apache 2.0 (inherited from rules_cc_modules project)
+Apache 2.0 
 
 ## Acknowledgments
 

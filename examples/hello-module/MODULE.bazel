@@ -12,15 +12,8 @@ use_repo(cc_configure, "local_config_cc")
 
 bazel_dep(name = "rules_cc_module", dev_dependency = True)
 
-# git_override(
-#     module_name = "rules_cpp_module",
-#     remote = "https://github.com/hongyan32/rules_cc_module.git",
-#     commit = "",
-# )
-
-local_path_override(
+git_override(
     module_name = "rules_cc_module",
-    path = "D:/projects/github/rules_cc_module",
+    remote = "https://github.com/hongyan32/rules_cc_module.git",
+    commit = "b39f033",
 )
-
-
