@@ -1,0 +1,18 @@
+build --enable_bzlmod
+
+# Set BAZEL_LLVM environment variable to the path of your LLVM installation
+build:clang_config --action_env=BAZEL_LLVM="D:/Applications/VisualStudio/2022/Community/VC/Tools/Llvm"
+
+# usage:  bazel build --config=clang_config //src:hello_module
+build:clang_config --extra_toolchains=@local_config_cc//:cc-toolchain-x64_windows-clang-cl
+build:clang_config --extra_execution_platforms=//:x64_windows-clang-cl
+
+# Enable experimental C++ modules support
+build --experimental_cpp_modules
+
+# build --cxxopt=/std=c++23
+build --copt=/utf-8
+build --cxxopt=/std:c++latest
+
+
+

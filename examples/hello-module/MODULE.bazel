@@ -1,0 +1,26 @@
+module(
+    name = "cpp_module_example",
+    version = "0.1.0",
+)
+
+bazel_dep(name = "rules_cc", version = "0.1.1")
+
+# For clang-cl configuration
+bazel_dep(name = "platforms", version = "0.0.10")
+cc_configure = use_extension("@rules_cc//cc:extensions.bzl", "cc_configure_extension")
+use_repo(cc_configure, "local_config_cc")
+
+bazel_dep(name = "rules_cc_module", dev_dependency = True)
+
+# git_override(
+#     module_name = "rules_cpp_module",
+#     remote = "https://github.com/hongyan32/rules_cc_module.git",
+#     commit = "",
+# )
+
+local_path_override(
+    module_name = "rules_cc_module",
+    path = "D:/projects/github/rules_cc_module",
+)
+
+

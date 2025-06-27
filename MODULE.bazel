@@ -1,0 +1,12 @@
+"""此文件用于将目录及其内容标识为 Bazel 工作区，并位于项目目录结构的根目录中。您还可以在其中指定外部依赖项。"""
+
+# 定义模块名称和版本
+module(
+    name = "rules_cc_module",
+    version = "0.1.0",
+)
+
+bazel_dep(name = "rules_cc", version = "0.1.1")
+bazel_dep(name = "bazel_skylib", version = "1.7.1")
+
+

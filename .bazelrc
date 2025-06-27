@@ -1,0 +1,5 @@
+# Enable Bzlmod for every Bazel command
+common --enable_bzlmod
+
+build --experimental_cpp_modules
+# build --cxxopt=/std:c++latest

@@ -1,0 +1,13 @@
+# Copyright 2025 rules_cc_module authors
+# Licensed under the Apache License, Version 2.0
+
+package(default_visibility = ["//visibility:public"])
+
+# Export the main defs file
+exports_files(["cc_module/defs.bzl"])
+
+# Alias for easier access
+alias(
+    name = "defs",
+    actual = "//cc_module:defs.bzl",
+)

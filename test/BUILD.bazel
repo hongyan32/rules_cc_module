@@ -1,0 +1,30 @@
+# Copyright 2025 rules_cc_module authors
+# Licensed under the Apache License, Version 2.0
+
+load("//cc_module:defs.bzl", "cc_module_library", "cc_module_binary")
+
+# Example module library
+cc_module_library(
+    name = "math_module",
+    module_interfaces = ["math_module.ixx"],
+    srcs = [
+        "math_impl.cpp",
+    ],
+    copts = [
+        "/std:c++latest",
+    ],
+    hdrs = ["math_common.h"],
+    features = ["cpp_modules"],
+)
+
+# Example binary using the module
+cc_module_binary(
+    name = "calculator",
+    srcs = ["main.cpp"],
+    deps = [":math_module"],
+    copts = [
+        "/std:c++latest",
+    ],
+    linkstatic = True,
+    features = ["cpp_modules"],
+)
