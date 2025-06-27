@@ -153,10 +153,11 @@ def _cc_module_library_impl(ctx):
     cxx_flags = []
     cxx_flags.extend(ctx.attr.copts)  # Rule-level compilation options
     cxx_flags.extend(ctx.fragments.cpp.cxxopts)  # C++ specific compilation options
-    cxx_flags.extend(get_module_compile_flags(cc_toolchain, all_module_dependencies))  # C++ module flags
     
     user_compile_flags = []
     user_compile_flags.extend(ctx.fragments.cpp.copts)  # General C/C++ compilation options
+    user_compile_flags.extend(get_module_compile_flags(cc_toolchain, all_module_dependencies))  # C++ module flags
+
 
     # Regular C++ compilation
     (compilation_context, compilation_outputs) = cc_common.compile(
@@ -167,9 +168,8 @@ def _cc_module_library_impl(ctx):
         public_hdrs = ctx.files.hdrs,
         private_hdrs = ctx.files.private_hdrs,
         srcs = ctx.files.srcs,
-        includes = ctx.attr.includes,
         quote_includes = ctx.attr.quote_includes,
-        system_includes = ctx.attr.system_includes,
+        system_includes = cc_helper.system_include_dirs(ctx, additional_make_variable_substitutions),
         defines = ctx.attr.defines,
         compilation_contexts = compilation_contexts,
         additional_inputs = module_ifc_inputs,  # Add module .ifc files as input dependencies
@@ -196,6 +196,10 @@ def _cc_module_library_impl(ctx):
 
     # Process link flags using cc_helper directly
     user_link_flags = cc_helper.linkopts(ctx, additional_make_variable_substitutions, cc_toolchain)
+
+    # Handle the case when compilation_outputs is empty (e.g., header-only libraries)
+    # For header-only libraries, we don't need to create actual library files,
+    # but we still need to provide compilation context for dependencies
     
     supports_dynamic_linker = cc_common.is_enabled(
         feature_configuration = feature_configuration,
@@ -209,31 +213,43 @@ def _cc_module_library_impl(ctx):
                                    feature_name = "header_module_codegen",
                                )))
 
-    # Linking
-    (linking_context, linking_outputs) = cc_common.create_linking_context_from_compilation_outputs(
-        name = ctx.label.name,
-        actions = ctx.actions,
-        cc_toolchain = cc_toolchain,
-        compilation_outputs = compilation_outputs,
-        feature_configuration = feature_configuration,
-        language = "c++",
-        additional_inputs = ctx.files.additional_linker_inputs,
-        linking_contexts = linking_contexts,
-        user_link_flags = user_link_flags,
-        alwayslink = ctx.attr.alwayslink,
-        disallow_dynamic_library = not create_dynamic_library,
-    )
-
-    library = linking_outputs.library_to_link
-    files = []
-    files.extend(compilation_outputs.objects)
-    files.extend(compilation_outputs.pic_objects)
-    if library.pic_static_library:
-        files.append(library.pic_static_library)
-    if library.static_library:
-        files.append(library.static_library)
-    if library.dynamic_library:
-        files.append(library.dynamic_library)
+    # Check if we have any actual compilation outputs to link
+    has_compilation_outputs = not cc_helper.is_compilation_outputs_empty(compilation_outputs)
+    
+    if has_compilation_outputs:
+        # Normal case: we have object files to link
+        (linking_context, linking_outputs) = cc_common.create_linking_context_from_compilation_outputs(
+            name = ctx.label.name,
+            actions = ctx.actions,
+            cc_toolchain = cc_toolchain,
+            compilation_outputs = compilation_outputs,
+            feature_configuration = feature_configuration,
+            language = "c++",
+            additional_inputs = ctx.files.additional_linker_inputs,
+            linking_contexts = linking_contexts,
+            user_link_flags = user_link_flags,
+            alwayslink = ctx.attr.alwayslink,
+            disallow_dynamic_library = not create_dynamic_library,
+        )
+        
+        # Collect output files
+        library = linking_outputs.library_to_link
+        files = []
+        files.extend(compilation_outputs.objects)
+        files.extend(compilation_outputs.pic_objects)
+        if library:
+            if library.pic_static_library:
+                files.append(library.pic_static_library)
+            if library.static_library:
+                files.append(library.static_library)
+            if library.dynamic_library:
+                files.append(library.dynamic_library)
+    else:
+        # Header-only library case: create minimal linking context
+        linking_context = cc_common.merge_linking_contexts(
+            linking_contexts = linking_contexts
+        )
+        files = []
 
     # Return providers
     providers = [
@@ -383,7 +399,8 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
     # Create a temporary depset to pass to get_module_compile_flags
     module_deps_depset = depset(direct = module_compilation_infos)
     all_user_compile_flags.extend(get_module_compile_flags(cc_toolchain, module_deps_depset))
-    
+    additional_make_variable_substitutions = cc_helper.get_toolchain_global_make_variables(cc_toolchain)
+
     compilation_variables = cc_common.create_compile_variables(
         cc_toolchain = cc_toolchain,
         feature_configuration = feature_configuration,
@@ -392,7 +409,7 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
         user_compile_flags = all_user_compile_flags,
         include_directories = depset(merged_compilation_context.includes.to_list()),
         quote_include_directories = depset(merged_compilation_context.quote_includes.to_list()),
-        system_include_directories = depset(merged_compilation_context.system_includes.to_list()),
+        system_include_directories = depset(cc_helper.system_include_dirs(ctx, additional_make_variable_substitutions) + merged_compilation_context.system_includes.to_list()),
         preprocessor_defines = depset(merged_compilation_context.defines.to_list()),
         add_legacy_cxx_options = True,  # Ensure legacy C++ options are included
     )
@@ -520,10 +537,19 @@ cc_module_library = rule(
     - Compilation of C++ module interface files (.ixx, .cppm, .mpp)
     - Support for module partitions (represented by hyphens in file names)
     - Mixed compilation with traditional C++ code
+    - Header-only libraries (only hdrs, no srcs or module_interfaces)
+    - Module-only libraries (only module_interfaces, no srcs)
     - Cross-platform compiler support (MSVC, Clang)
+
+    Library types supported:
+    1. **Standard module library**: module_interfaces + srcs + hdrs
+    2. **Header-only library**: only hdrs (no compilation outputs generated)
+    3. **Module-only library**: only module_interfaces (templates/constexpr in interface)
+    4. **Mixed library**: Any combination of the above
 
     Example usage:
     ```starlark
+    # Standard module library
     cc_module_library(
         name = "my_module",
         module_interfaces = ["my_module.ixx"],
@@ -532,6 +558,20 @@ cc_module_library = rule(
         deps = ["//other:module_dep"],
         copts = ["/std:c++20"],  # MSVC
         # copts = ["-std=c++20"],  # GCC/Clang
+    )
+    
+    # Header-only library
+    cc_module_library(
+        name = "header_only",
+        hdrs = ["utilities.h"],
+        copts = ["/std:c++20"],
+    )
+    
+    # Module-only library (templates/constexpr)
+    cc_module_library(
+        name = "template_module",
+        module_interfaces = ["templates.ixx"],
+        copts = ["/std:c++20"],
     )
     ```
 
@@ -626,7 +666,7 @@ cc_module_library = rule(
         ),
         "includes": attr.string_list(
             doc = """
-            List of include paths (relative to workspace root).
+            List of include paths.
 
             These paths will be added to the compilation command's -I arguments.
             Paths are relative to the current BUILD file's package.
@@ -638,14 +678,6 @@ cc_module_library = rule(
 
             These paths will be added to the compilation command's -iquote arguments (for supported compilers).
             Used for #include "..." style includes.
-            """,
-        ),
-        "system_includes": attr.string_list(
-            doc = """
-            List of system include paths.
-
-            These paths will be added to the compilation command's -isystem arguments (for supported compilers).
-            Used for system header files, typically don't generate warnings.
             """,
         ),
         "defines": attr.string_list(
@@ -771,10 +803,13 @@ def _cc_module_binary_impl(ctx):
     cxx_flags = []
     cxx_flags.extend(ctx.attr.copts)  # Rule-level compilation options
     cxx_flags.extend(ctx.fragments.cpp.cxxopts)  # C++ specific compilation options
-    cxx_flags.extend(get_module_compile_flags(cc_toolchain, all_module_dependencies))  # C++ module flags
     
     user_compile_flags = []
     user_compile_flags.extend(ctx.fragments.cpp.copts)  # General C/C++ compilation options
+    user_compile_flags.extend(get_module_compile_flags(cc_toolchain, all_module_dependencies))  # C++ module flags
+
+    additional_make_variable_substitutions = cc_helper.get_toolchain_global_make_variables(cc_toolchain)
+    user_link_flags = cc_helper.linkopts(ctx, additional_make_variable_substitutions, cc_toolchain)
 
     # Regular C++ compilation
     (_compilation_context, compilation_outputs) = cc_common.compile(
@@ -783,9 +818,8 @@ def _cc_module_binary_impl(ctx):
         feature_configuration = feature_configuration,
         cc_toolchain = cc_toolchain,
         srcs = ctx.files.srcs,
-        includes = ctx.attr.includes,
         quote_includes = ctx.attr.quote_includes,
-        system_includes = ctx.attr.system_includes,
+        system_includes = cc_helper.system_include_dirs(ctx, additional_make_variable_substitutions),
         defines = ctx.attr.defines,
         compilation_contexts = compilation_contexts,
         additional_inputs = module_ifc_inputs,  # Add module .ifc files as input dependencies
@@ -956,7 +990,7 @@ cc_module_binary = rule(
         ),
         "includes": attr.string_list(
             doc = """
-            List of include paths (relative to workspace root).
+            List of include paths.
 
             These paths will be added to the compilation command's -I arguments.
             Paths are relative to the current BUILD file's package.
@@ -968,14 +1002,6 @@ cc_module_binary = rule(
 
             These paths will be added to the compilation command's -iquote arguments (for supported compilers).
             Used for #include "..." style includes.
-            """,
-        ),
-        "system_includes": attr.string_list(
-            doc = """
-            List of system include paths.
-
-            These paths will be added to the compilation command's -isystem arguments (for supported compilers).
-            Used for system header files, typically don't generate warnings.
             """,
         ),
         "defines": attr.string_list(

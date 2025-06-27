@@ -145,6 +145,14 @@ def _get_public_hdrs(ctx):
                 artifact_label_map[artifact] = hdr.label
     return _map_to_list(artifact_label_map)
 
+def _contains_up_level_references(path):
+    return path.startswith("..") and (len(path) == 2 or path[2] == "/")
+
+def _get_relative(path_a, path_b):
+    if paths.is_absolute(path_b):
+        return path_b
+    return paths.normalize(paths.join(path_a, path_b))
+
 def _is_repository_main(repository):
     return repository == ""
 
@@ -156,21 +164,21 @@ def _repository_exec_path(repository, sibling_repository_layout):
         prefix = ".."
     if repository.startswith("@"):
         repository = repository[1:]
-    return paths.get_relative(prefix, repository)
+    return _get_relative(prefix, repository)
 
 def _package_exec_path(ctx, package, sibling_repository_layout):
-    return paths.get_relative(_repository_exec_path(ctx.label.workspace_name, sibling_repository_layout), package)
+    return _get_relative(_repository_exec_path(ctx.label.workspace_name, sibling_repository_layout), package)
 
 def _package_source_root(repository, package, sibling_repository_layout):
     if _is_repository_main(repository) or sibling_repository_layout:
         return package
     if repository.startswith("@"):
         repository = repository[1:]
-    return paths.get_relative(paths.get_relative("external", repository), package)
+    return _get_relative(_get_relative("external", repository), package)
 
 def _system_include_dirs(ctx, additional_make_variable_substitutions):
     result = []
-    sibling_repository_layout = ctx.configuration.is_sibling_repository_layout()
+    sibling_repository_layout = False
     package = ctx.label.package
     package_exec_path = _package_exec_path(ctx, package, sibling_repository_layout)
     package_source_root = _package_source_root(ctx.label.workspace_name, package, sibling_repository_layout)
@@ -178,8 +186,8 @@ def _system_include_dirs(ctx, additional_make_variable_substitutions):
         includes_attr = _expand(ctx, include, additional_make_variable_substitutions)
         if includes_attr.startswith("/"):
             continue
-        includes_path = paths.get_relative(package_exec_path, includes_attr)
-        if not sibling_repository_layout and paths.contains_up_level_references(includes_path):
+        includes_path = _get_relative(package_exec_path, includes_attr)
+        if not sibling_repository_layout and _contains_up_level_references(includes_path):
             fail("Path references a path above the execution root.", attr = "includes")
 
         if includes_path == ".":
@@ -190,10 +198,8 @@ def _system_include_dirs(ctx, additional_make_variable_substitutions):
 
         # We don't need to perform the above checks against out_includes_path again since any errors
         # must have manifested in includesPath already.
-        out_includes_path = paths.get_relative(package_source_root, includes_attr)
-        if (ctx.configuration.has_separate_genfiles_directory()):
-            result.append(paths.get_relative(ctx.genfiles_dir.path, out_includes_path))
-        result.append(paths.get_relative(ctx.bin_dir.path, out_includes_path))
+        out_includes_path = _get_relative(package_source_root, includes_attr)
+        result.append(_get_relative(ctx.bin_dir.path, out_includes_path))
     return result
 
 def _lookup_var(ctx, additional_vars, var):

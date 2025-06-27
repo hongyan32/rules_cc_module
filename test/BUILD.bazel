@@ -28,3 +28,37 @@ cc_module_binary(
     linkstatic = True,
     features = ["cpp_modules"],
 )
+
+# Header-only library test (no srcs, only hdrs)
+cc_module_library(
+    name = "header_only_lib",
+    hdrs = ["header_only_test.h"],
+    copts = ["/std:c++latest"],
+)
+
+# Binary using header-only library
+cc_module_binary(
+    name = "header_only_test",
+    srcs = ["header_only_main.cpp"],
+    deps = [":header_only_lib"],
+    copts = ["/std:c++latest"],
+    linkstatic = True,
+)
+
+# Module interface only (no srcs) - this should work since module interfaces generate .obj files
+cc_module_library(
+    name = "header_only_module_lib",
+    module_interfaces = ["header_only_module.ixx"],
+    copts = ["/std:c++latest"],
+    features = ["cpp_modules"],
+)
+
+# Binary using header-only module
+cc_module_binary(
+    name = "header_only_module_test",
+    srcs = ["header_only_module_main.cpp"],
+    deps = [":header_only_module_lib"],
+    copts = ["/std:c++latest"],
+    features = ["cpp_modules"],
+    linkstatic = True,
+)

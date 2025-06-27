@@ -61,11 +61,25 @@ cc_module_library(
     copts = ["/std:c++20"],                   # C++20 standard
 )
 
+# Header-only library (traditional headers)
+cc_module_library(
+    name = "header_only_lib",
+    hdrs = ["utilities.h"],                   # Only header files
+    copts = ["/std:c++20"],
+)
+
+# Module-only library (no separate implementation files)
+cc_module_library(
+    name = "template_module",
+    module_interfaces = ["templates.ixx"],    # Template implementations in module interface
+    copts = ["/std:c++20"],
+)
+
 # Application using modules
 cc_module_binary(
     name = "calculator",
     srcs = ["main.cpp"],
-    deps = [":math_module"],
+    deps = [":math_module", ":header_only_lib", ":template_module"],
     copts = ["/std:c++20"],
 )
 ```

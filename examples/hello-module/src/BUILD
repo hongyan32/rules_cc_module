@@ -23,6 +23,8 @@ cc_module_library(
         "module2/module2.ixx",
         "module2/module2-part.ixx",
     ],
+    includes = ["."],  # Include directory for module2
+    hdrs = ["module2/header_only.hpp"],  # Include the header-only library
     srcs = glob(["module2/**/*.cpp"]),
     deps = [":module1"],
     features = ["cpp_modules"],
