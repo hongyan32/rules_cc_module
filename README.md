@@ -40,7 +40,7 @@ bazel_dep(name = "rules_cc_module", dev_dependency = True)
 git_override(
     module_name = "rules_cc_module",
     remote = "https://github.com/hongyan32/rules_cc_module.git",
-    commit = "b39f033",
+    commit = "e7a4fe9",
 )
 ```
 You may repalce commit attribute with latest-commit-hash 

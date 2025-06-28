@@ -3,6 +3,8 @@ module(
     version = "0.1.0",
 )
 
+bazel_dep(name = "msgpack-c", version = "6.1.0")
+
 bazel_dep(name = "rules_cc", version = "0.1.1")
 
 # For clang-cl configuration
@@ -15,5 +17,6 @@ bazel_dep(name = "rules_cc_module", dev_dependency = True)
 git_override(
     module_name = "rules_cc_module",
     remote = "https://github.com/hongyan32/rules_cc_module.git",
-    commit = "b39f033",
+    commit = "e7a4fe9",
 )
+
