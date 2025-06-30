@@ -45,9 +45,9 @@ load("//cc_module:cc_helper.bzl", "cc_helper")
 load("//cc_module:providers.bzl", "ModuleCompilationInfo", "ModuleInfo")
 
 
-CC_SOURCE = [".cc", ".cpp", ".cxx", ".c++"]
+CC_SOURCE = [".cc", ".cpp", ".cxx", ".c++", ".C", ".cu", ".cl"]
 C_SOURCE = [".c"]
-CC_HEADER = [".h", ".hh", ".hpp", ".ipp", ".hxx", ".h++"]
+CC_HEADER = [".h", ".hh", ".hpp", ".ipp", ".hxx", ".h++", ".inc", ".inl", ".tlh", ".tli", ".H", ".tcc"]
 CC_MODULE = [".ixx", ".cppm", ".mpp"]
 
 
@@ -78,6 +78,30 @@ def get_module_name_from_file(interface_file):
     
     return basename
 
+def _filter_headers_from_srcs(srcs_files):
+    """Filter header files from source files list.
+    
+    Args:
+        srcs_files: List of source files
+        
+    Returns:
+        tuple: (header_files, non_header_files) - separated header and non-header files
+    """
+    header_files = []
+    non_header_files = []
+    
+    for file in srcs_files:
+        is_header = False
+        for ext in CC_HEADER:
+            if file.basename.endswith(ext):
+                header_files.append(file)
+                is_header = True
+                break
+        if not is_header:
+            non_header_files.append(file)
+    
+    return header_files, non_header_files
+
 def _filter_none(input_list):
     filtered_list = []
     for element in input_list:
@@ -105,6 +129,10 @@ def _cc_module_library_impl(ctx):
 
 
     cc_helper.check_cpp_modules(ctx, feature_configuration)
+    
+    # Filter headers from srcs (following Bazel's standard approach)
+    private_hdrs, actual_srcs = _filter_headers_from_srcs(ctx.files.srcs)
+    
     # Collect module compilation contexts, not including current module information yet
     module_compilation_infos = []
     for dep in ctx.attr.deps:
@@ -124,6 +152,7 @@ def _cc_module_library_impl(ctx):
             interface_files = ctx.files.module_interfaces,
             module_compilation_infos = module_compilation_infos,
             compilation_contexts = compilation_contexts,
+            current_target_headers = ctx.files.hdrs + private_hdrs,
         )
     
 
@@ -166,8 +195,8 @@ def _cc_module_library_impl(ctx):
         feature_configuration = feature_configuration,
         cc_toolchain = cc_toolchain,
         public_hdrs = ctx.files.hdrs,
-        private_hdrs = ctx.files.private_hdrs,
-        srcs = ctx.files.srcs,
+        private_hdrs = private_hdrs,
+        srcs = actual_srcs,
         quote_includes = ctx.attr.quote_includes,
         system_includes = cc_helper.system_include_dirs(ctx, additional_make_variable_substitutions),
         defines = ctx.attr.defines,
@@ -297,7 +326,7 @@ def sort_module_interface_files(interface_files):
     # Return partition modules first, then main modules
     return partition_modules + main_modules
 
-def compile_module_interfaces(ctx, cc_toolchain, feature_configuration, interface_files, module_compilation_infos, compilation_contexts):
+def compile_module_interfaces(ctx, cc_toolchain, feature_configuration, interface_files, module_compilation_infos, compilation_contexts, current_target_headers):
     """Compiles multiple C++ module interface files, ensuring partitions are built before main modules.
 
     If there are partitions, partition files must be compiled first, so sorting is needed.
@@ -313,6 +342,7 @@ def compile_module_interfaces(ctx, cc_toolchain, feature_configuration, interfac
         interface_files: List of interface files to compile
         module_compilation_infos: List of ModuleCompileInfo for module dependencies
         compilation_contexts: C++ compilation contexts
+        current_target_headers: List of header files from the current target (hdrs + private_hdrs)
         
     Returns:
         tuple: (current_module_compilation_infos, all_module_compilation_infos)
@@ -336,13 +366,14 @@ def compile_module_interfaces(ctx, cc_toolchain, feature_configuration, interfac
             interface_file = interface_file,
             module_compilation_infos = all_module_compilation_infos,
             compilation_contexts = compilation_contexts,
+            current_target_headers = current_target_headers,
         )
         all_module_compilation_infos.append(module_compilation_info)
         current_module_compilation_infos.append(module_compilation_info)
 
     return current_module_compilation_infos
 
-def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, module_name, interface_file, module_compilation_infos, compilation_contexts):
+def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, module_name, interface_file, module_compilation_infos, compilation_contexts, current_target_headers):
     """
     Compiles a single module interface file, generating .ifc and .obj files.
     
@@ -364,6 +395,7 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
         interface_file: Module interface file
         module_compilation_infos: List of module compilation information (dependent modules)
         compilation_contexts: List of compilation contexts (from dependencies)
+        current_target_headers: List of header files from the current target (hdrs + private_hdrs)
         
     Returns:
         ModuleCompilationInfo: Contains compiled .ifc and .obj file information
@@ -377,12 +409,12 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
     
     if is_msvc:
         # MSVC compiler uses .ifc and .obj
-        ifc_file = ctx.actions.declare_file("_objs/{}/{}.ifc".format(ctx.label.name, safe_name))
-        obj_file = ctx.actions.declare_file("_objs/{}/{}.obj".format(ctx.label.name, safe_name))
+        ifc_file = ctx.actions.declare_file("_bmis/{}/{}.ifc".format(ctx.label.name, safe_name))
+        obj_file = ctx.actions.declare_file("_bmis/{}/{}.obj".format(ctx.label.name, safe_name))
     else:
         # GCC/Clang compilers use .pcm and .o
-        ifc_file = ctx.actions.declare_file("_objs/{}/{}.pcm".format(ctx.label.name, safe_name))
-        obj_file = ctx.actions.declare_file("_objs/{}/{}.o".format(ctx.label.name, safe_name))
+        ifc_file = ctx.actions.declare_file("_bmis/{}/{}.pcm".format(ctx.label.name, safe_name))
+        obj_file = ctx.actions.declare_file("_bmis/{}/{}.o".format(ctx.label.name, safe_name))
     
     # Merge all compilation contexts
     merged_compilation_context = cc_common.merge_compilation_contexts(
@@ -410,7 +442,7 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
         include_directories = depset(merged_compilation_context.includes.to_list()),
         quote_include_directories = depset(merged_compilation_context.quote_includes.to_list()),
         system_include_directories = depset(cc_helper.system_include_dirs(ctx, additional_make_variable_substitutions) + merged_compilation_context.system_includes.to_list()),
-        preprocessor_defines = depset(merged_compilation_context.defines.to_list()),
+        preprocessor_defines = depset(merged_compilation_context.defines.to_list() + ctx.attr.defines),
         add_legacy_cxx_options = True,  # Ensure legacy C++ options are included
     )
     
@@ -458,15 +490,26 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
         # Here we need to change "-c ixxfile" to "-x c++-module -c ixxfile", additionally specify module file with -x c++-module
         compile_args.add("-x", "c++-module")
         compile_args.add("-c", interface_file.path)  # Ensure compiler knows this is a module interface file
-    # Collect all input files
-    input_files = [interface_file]
+    # Collect all input files efficiently using depsets
+    direct_inputs = [interface_file]
+    transitive_inputs = []
     
-    # Add header files from compilation context
-    input_files.extend(merged_compilation_context.headers.to_list())
-    
-    # Add module dependency .ifc files as inputs
+    # Add module dependency .ifc files as inputs (these are actual dependencies)
     for module_dep in module_compilation_infos:
-        input_files.append(module_dep.ifc_file)
+        direct_inputs.append(module_dep.ifc_file)
+    
+    # Add headers from compilation context as inputs
+    # Include both dependency headers and current target headers
+    if merged_compilation_context.headers:
+        transitive_inputs.append(merged_compilation_context.headers)
+    if current_target_headers:
+        direct_inputs.extend(current_target_headers)
+    
+    # Create final input depset
+    all_inputs = depset(
+        direct = direct_inputs,
+        transitive = transitive_inputs
+    )
 
     # Execute compilation
     # This method ensures that module interface compilation uses exactly the same toolchain settings
@@ -475,7 +518,7 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
         executable = c_compiler_path,
         arguments = [compile_args],
         env = env,
-        inputs = depset(input_files),
+        inputs = all_inputs,
         outputs = [ifc_file, obj_file],
         mnemonic = "CppModuleCompile",
         progress_message = "Compiling C++ module {} from {}".format(module_name, interface_file.basename),
@@ -599,16 +642,6 @@ cc_module_library = rule(
             Supported file extensions: .h, .hh, .hpp, .ipp, .hxx, .h++
             """,
         ),
-        "private_hdrs": attr.label_list(
-            allow_files = CC_HEADER,
-            doc = """
-            List of private header files.
-
-            These header files are only used when compiling the current library and will not be propagated 
-            to other targets that depend on this library.
-            Usually used for implementation detail header files.
-            """,
-        ),
         "module_interfaces": attr.label_list(
             allow_files = CC_MODULE,
             doc = """
@@ -631,12 +664,16 @@ cc_module_library = rule(
             """,
         ),
         "srcs": attr.label_list(
-            allow_files = CC_SOURCE,
+            allow_files = CC_SOURCE + CC_HEADER,
             doc = """
-            List of C++ source files.
+            List of C++ source and header files.
 
-            These are regular C++ implementation files that will be compiled together with module interface files.
-            Supported file extensions: .cc, .cpp, .cxx, .c++
+            These are C++ implementation files and private header files that will be compiled together with module interface files.
+            Supported source file extensions: .cc, .cpp, .cxx, .c++
+            Supported header file extensions: .h, .hh, .hpp, .ipp, .hxx, .h++
+            
+            Header files included in srcs are treated as private headers and will not be propagated to targets that depend on this library.
+            Use the hdrs attribute for public headers that should be available to dependent targets.
             
             Note: Source files can import modules defined in module_interfaces.
             """,
@@ -760,6 +797,9 @@ def _cc_module_binary_impl(ctx):
     # Check C++ modules functionality
     cc_helper.check_cpp_modules(ctx, feature_configuration)
     
+    # Filter headers from srcs (following Bazel's standard approach)
+    private_hdrs, actual_srcs = _filter_headers_from_srcs(ctx.files.srcs)
+    
     # Collect module compilation contexts, not including current module information yet
     module_compilation_infos = []
     for dep in ctx.attr.deps:
@@ -777,6 +817,7 @@ def _cc_module_binary_impl(ctx):
             interface_files = ctx.files.module_interfaces,
             module_compilation_infos = module_compilation_infos,
             compilation_contexts = compilation_contexts,
+            current_target_headers = private_hdrs,  # cc_module_binary uses private headers from srcs
         )
 
     # Collect all module object files for regular compilation
@@ -817,7 +858,8 @@ def _cc_module_binary_impl(ctx):
         actions = ctx.actions,
         feature_configuration = feature_configuration,
         cc_toolchain = cc_toolchain,
-        srcs = ctx.files.srcs,
+        srcs = actual_srcs,
+        private_hdrs = private_hdrs,
         quote_includes = ctx.attr.quote_includes,
         system_includes = cc_helper.system_include_dirs(ctx, additional_make_variable_substitutions),
         defines = ctx.attr.defines,
@@ -923,12 +965,15 @@ cc_module_binary = rule(
     implementation = _cc_module_binary_impl,
     attrs = {
         "srcs": attr.label_list(
-            allow_files = CC_SOURCE,
+            allow_files = CC_SOURCE + CC_HEADER,
             doc = """
-            List of C++ source files.
+            List of C++ source and header files.
 
-            Contains main() function and other application logic source files.
-            Supported file extensions: .cc, .cpp, .cxx, .c++
+            Contains main() function and other application logic source files, plus any private header files.
+            Supported source file extensions: .cc, .cpp, .cxx, .c++
+            Supported header file extensions: .h, .hh, .hpp, .ipp, .hxx, .h++
+            
+            Header files included in srcs are treated as private headers for the binary.
             
             Source files can:
             - Contain the main() function

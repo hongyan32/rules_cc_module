@@ -2,4 +2,5 @@
 common --enable_bzlmod
 
 build --experimental_cpp_modules
-# build --cxxopt=/std:c++latest
+build --copt=/utf-8
+build --cxxopt=/std:c++latest
