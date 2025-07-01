@@ -484,14 +484,11 @@ def _check_cpp_standard_for_modules(ctx):
     if not has_cpp_std:
         # 输出错误，提示用户可能需要指定 C++20 或更高标准
         fail("C++ modules require C++20 or later. No explicit C++ standard flag found." +
-             " Please ensure your build configuration specifies a C++ standard that supports modules." +
-             " Supported versions: C++20, C++23, C++latest. " + 
              "For MSVC, use /std:c++20 or /std:c++latest. " +
              "For GCC/Clang, use -std=c++20 or -std=c++23.")
     else:
         # 如果设置了标准但不支持模块，报错
         fail("C++ modules require C++20 or later. Current C++ standard may not support modules. " +
-             "Supported versions: C++20, C++23, C++latest. " + 
              "For MSVC, use /std:c++20 or /std:c++latest. " +
              "For GCC/Clang, use -std=c++20 or -std=c++23.")
 

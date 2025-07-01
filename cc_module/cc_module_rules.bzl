@@ -180,13 +180,12 @@ def _cc_module_library_impl(ctx):
 
     # Collect C++ and general compilation flags separately
     cxx_flags = []
-    cxx_flags.extend(ctx.attr.copts)  # Rule-level compilation options
-    cxx_flags.extend(ctx.fragments.cpp.cxxopts)  # C++ specific compilation options
-    
-    user_compile_flags = []
-    user_compile_flags.extend(ctx.fragments.cpp.copts)  # General C/C++ compilation options
-    user_compile_flags.extend(get_module_compile_flags(cc_toolchain, all_module_dependencies))  # C++ module flags
+    cxx_flags.extend(ctx.attr.cxxopts)  # Rule-level C++ compilation options
 
+    # ctx.fragments.cpp.cxxopts will be add by cc_common.compile internally, and is immutable, so we don't need to add it here    
+    user_compile_flags = []
+    user_compile_flags.extend(ctx.attr.copts)  # Rule-level compilation options
+    user_compile_flags.extend(get_module_compile_flags(cc_toolchain, all_module_dependencies))  # C++ module flags
 
     # Regular C++ compilation
     (compilation_context, compilation_outputs) = cc_common.compile(
@@ -203,9 +202,10 @@ def _cc_module_library_impl(ctx):
         compilation_contexts = compilation_contexts,
         additional_inputs = module_ifc_inputs,  # Add module .ifc files as input dependencies
         user_compile_flags = user_compile_flags,
-        cxx_flags = cxx_flags,  # C++ specific compilation flags
+        conly_flags = ctx.attr.conlyopts,
+        cxx_flags = cxx_flags,  # C++ specific compilation flags 
     )
-    
+
     compilation_outputs_without_module = compilation_outputs
     # Add module object files to compilation outputs
     if module_obj_files:
@@ -425,6 +425,7 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
     # Merge user compilation flags, including rule-level and fragment-level options
     all_user_compile_flags = []
     all_user_compile_flags.extend(ctx.attr.copts)
+    all_user_compile_flags.extend(ctx.attr.cxxopts)
     all_user_compile_flags.extend(ctx.fragments.cpp.copts)
     all_user_compile_flags.extend(ctx.fragments.cpp.cxxopts)
     # Use get_module_compile_flags to get module dependency flags, ensuring consistency with other places
@@ -470,8 +471,8 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
     
     # Add base compilation options (standard options from cc_common), filter out -c file, will add later
     for option in base_compiler_options:
-        # Filter out -c and the file argument that follows it
-        if option == "-c":
+        # Filter out -c, /c and the file argument that follows it
+        if option == "-c" or option == "/c":
             continue
         if option.endswith(".ixx") or option.endswith(".cppm") or option.endswith(".mpp"):
             continue
@@ -738,6 +739,30 @@ cc_module_library = rule(
             - Debug: ["/Zi"] (MSVC) or ["-g"] (GCC/Clang)
             """,
         ),
+        "cxxopts": attr.string_list(
+            doc = """
+            List of C++-specific compilation options.
+
+            These options will be added only when compiling C++ source files (.cpp, .cxx, .cc).
+            They will not be applied to C source files (.c).
+            
+            Examples:
+            - MSVC: ["/std:c++latest", "/permissive-"]
+            - GCC/Clang: ["-std=c++20", "-fno-rtti"]
+            """,
+        ),
+        "conlyopts": attr.string_list(
+            doc = """
+            List of C-specific compilation options.
+
+            These options will be added only when compiling C source files (.c).
+            They will not be applied to C++ source files (.cpp, .cxx, .cc).
+            
+            Examples:
+            - MSVC: ["/TC"]
+            - GCC/Clang: ["-std=c99", "-Wstrict-prototypes"]
+            """,
+        ),
         "linkopts": attr.string_list(
             doc = """
             List of linker options.
@@ -842,12 +867,14 @@ def _cc_module_binary_impl(ctx):
 
     # Collect C++ and general compilation flags separately
     cxx_flags = []
-    cxx_flags.extend(ctx.attr.copts)  # Rule-level compilation options
-    cxx_flags.extend(ctx.fragments.cpp.cxxopts)  # C++ specific compilation options
+    cxx_flags.extend(ctx.attr.cxxopts)  # Rule-level C++ compilation options
+
+    # cxx_flags.extend(ctx.fragments.cpp.cxxopts)  # 这个会自动添加，
     
     user_compile_flags = []
-    user_compile_flags.extend(ctx.fragments.cpp.copts)  # General C/C++ compilation options
+    user_compile_flags.extend(ctx.attr.copts)  # Rule-level compilation options
     user_compile_flags.extend(get_module_compile_flags(cc_toolchain, all_module_dependencies))  # C++ module flags
+
 
     additional_make_variable_substitutions = cc_helper.get_toolchain_global_make_variables(cc_toolchain)
     user_link_flags = cc_helper.linkopts(ctx, additional_make_variable_substitutions, cc_toolchain)
@@ -866,6 +893,7 @@ def _cc_module_binary_impl(ctx):
         compilation_contexts = compilation_contexts,
         additional_inputs = module_ifc_inputs,  # Add module .ifc files as input dependencies
         user_compile_flags = user_compile_flags,
+        conly_flags = ctx.attr.conlyopts,
         cxx_flags = cxx_flags,  # C++ specific compilation flags
     )
     
@@ -1068,6 +1096,30 @@ cc_module_binary = rule(
             Other common options:
             - Optimization: ["/O2"] (MSVC) or ["-O2"] (GCC/Clang)
             - Debug: ["/Zi"] (MSVC) or ["-g"] (GCC/Clang)
+            """,
+        ),
+        "cxxopts": attr.string_list(
+            doc = """
+            List of C++-specific compilation options.
+
+            These options will be added only when compiling C++ source files (.cpp, .cxx, .cc).
+            They will not be applied to C source files (.c).
+            
+            Examples:
+            - MSVC: ["/std:c++latest", "/permissive-"]
+            - GCC/Clang: ["-std=c++20", "-fno-rtti"]
+            """,
+        ),
+        "conlyopts": attr.string_list(
+            doc = """
+            List of C-specific compilation options.
+
+            These options will be added only when compiling C source files (.c).
+            They will not be applied to C++ source files (.cpp, .cxx, .cc).
+            
+            Examples:
+            - MSVC: ["/TC"]
+            - GCC/Clang: ["-std=c99", "-Wstrict-prototypes"]
             """,
         ),
         "linkopts": attr.string_list(
