@@ -7,6 +7,7 @@ This project provides comprehensive Bazel rules for compiling C++20 modules with
 ## Features
 
 - ✅ **Full C++20 Module Support**: Complete implementation of module interfaces, partitions, and dependencies
+- ✅ **Parallel Module Compilation**: Explicit dependency declarations enable parallel compilation of independent modules
 - ✅ **Multi-Compiler Support**: MSVC (cl.exe) and clang-cl with automatic flag adaptation
 - ✅ **Module Partitions**: Automatic handling of module partitions using filename conventions
 - ✅ **Dependency Management**: Automatic module dependency resolution and compilation ordering
@@ -102,12 +103,56 @@ Compiles C++ module libraries with full support for module interfaces and partit
 
 **Key Attributes:**
 - `module_interfaces`: List of module interface files (`.ixx`, `.cppm`, `.mpp`)
+- `module_dependencies`: Explicit module dependency declarations for parallel compilation
 - `srcs`: Implementation source files (`.cpp`, `.cc`, `.cxx`)
 - `hdrs`: Traditional header files (`.h`, `.hpp`, `.hxx`)
 - `deps`: Dependencies on other `cc_module_library` or `cc_library` targets
 - `copts`: Compiler options (e.g., `["/std:c++20"]` for MSVC)
 - `includes`: Include directories
 - `defines`: Preprocessor definitions
+
+**Module Dependencies for Parallel Compilation:**
+The `module_dependencies` attribute enables parallel compilation by explicitly declaring dependencies between modules. This allows independent modules to be compiled simultaneously while respecting dependency order.
+
+Format: `{module_key: [dependency_list]}`
+- `module_key`: File name (e.g., `"math.ixx"`) or module name (e.g., `"math"`)
+- `dependency_list`: List of dependencies as file names or module names
+- Modules not listed are considered to have no dependencies
+- Both file names and module names are supported as keys and values
+
+**Example with parallel compilation:**
+```starlark
+cc_module_library(
+    name = "graphics_module",
+    module_interfaces = [
+        "base_math.ixx",        # No dependencies
+        "geometry.ixx",         # No dependencies  
+        "renderer.ixx",         # Depends on both base_math and geometry
+        "graphics.ixx",         # Depends on renderer
+    ],
+    module_dependencies = {
+        # Using module names
+        "renderer": ["base_math", "geometry"],  # Can compile after base_math and geometry
+        "graphics": ["renderer"],               # Must compile after renderer
+        # base_math and geometry can compile in parallel (no dependencies declared)
+    },
+    srcs = glob(["*.cpp"]),
+    deps = [":math_module"],
+    copts = ["/std:c++20"],
+)
+
+# Alternative using file names
+cc_module_library(
+    name = "graphics_module_alt",
+    module_interfaces = ["base_math.ixx", "geometry.ixx", "renderer.ixx", "graphics.ixx"],
+    module_dependencies = {
+        # Using file names instead of module names
+        "renderer.ixx": ["base_math.ixx", "geometry.ixx"],
+        "graphics.ixx": ["renderer.ixx"],
+    },
+    copts = ["/std:c++20"],
+)
+```
 
 **Module Partitions:**
 Use hyphens in filenames to create module partitions:

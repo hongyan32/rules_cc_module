@@ -41,14 +41,9 @@ load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
 load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
 load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
 load("@rules_cc//cc:action_names.bzl", "CPP_COMPILE_ACTION_NAME")
+load("//cc_module:attrs.bzl", "CC_HEADER", "CC_MODULE", "cc_module_binary_attrs", "cc_module_library_attrs")
 load("//cc_module:cc_helper.bzl", "cc_helper")
 load("//cc_module:providers.bzl", "ModuleCompilationInfo", "ModuleInfo")
-
-
-CC_SOURCE = [".cc", ".cpp", ".cxx", ".c++", ".C", ".cu", ".cl"]
-C_SOURCE = [".c"]
-CC_HEADER = [".h", ".hh", ".hpp", ".ipp", ".hxx", ".h++", ".inc", ".inl", ".tlh", ".tli", ".H", ".tcc"]
-CC_MODULE = [".ixx", ".cppm", ".mpp"]
 
 
 def get_module_name_from_file(interface_file):
@@ -140,7 +135,7 @@ def _cc_module_library_impl(ctx):
             # Extract all module compilation information from ModuleInfo
             module_compilation_infos.extend(dep[ModuleInfo].module_dependencies.to_list())
 
-    # If there are module interface files, compile all module interface files in order
+       # If there are module interface files, compile all module interface files in order
     current_module_compilation_infos = []
     if hasattr(ctx.attr, "module_interfaces") and ctx.attr.module_interfaces:
         # Ensure cpp_modules feature is available, report error if not
@@ -282,7 +277,10 @@ def _cc_module_library_impl(ctx):
 
     # Return providers
     providers = [
-        DefaultInfo(files = depset(_filter_none(files))),
+        DefaultInfo(
+            files = depset(_filter_none(files)),
+            runfiles = ctx.runfiles(files = ctx.files.data),
+        ),
         CcInfo(
             compilation_context = compilation_context,
             linking_context = linking_context,
@@ -306,6 +304,140 @@ def is_partition_module(file):
     """
     return "-" in file.basename
 
+def _resolve_module_key(key, interface_files):
+    """Resolves a module key (file name or module name) to the actual file and module name.
+    
+    Args:
+        key: String - either a file name (e.g., "math.ixx") or module name (e.g., "math")
+        interface_files: List of interface files
+        
+    Returns:
+        tuple: (file, module_name) or (None, None) if not found
+    """
+    # First try to match as file name
+    for file in interface_files:
+        if file.basename == key:
+            return file, get_module_name_from_file(file)
+    
+    # Then try to match as module name
+    for file in interface_files:
+        module_name = get_module_name_from_file(file)
+        if module_name == key:
+            return file, module_name
+    
+    return None, None
+
+def _build_dependency_graph(interface_files, module_dependencies):
+    """Builds a dependency graph from interface files and module_dependencies.
+    
+    Args:
+        interface_files: List of interface files
+        module_dependencies: Dict mapping module keys to dependency lists
+        
+    Returns:
+        dict: Mapping from file to list of dependency files
+    """
+    file_to_deps = {}
+    
+    # Initialize all files with empty dependencies
+    for file in interface_files:
+        file_to_deps[file] = []
+    
+    # Process declared dependencies
+    for module_key, dep_keys in module_dependencies.items():
+        module_file, _ = _resolve_module_key(module_key, interface_files)
+        if not module_file:
+            # Skip unknown modules - they might be from dependencies
+            continue
+            
+        dep_files = []
+        for dep_key in dep_keys:
+            dep_file, _ = _resolve_module_key(dep_key, interface_files)
+            if dep_file:
+                dep_files.append(dep_file)
+        
+        file_to_deps[module_file] = dep_files
+    
+    return file_to_deps
+
+def _topological_sort(interface_files, dependency_graph):
+    """Performs topological sort on module interface files based on dependency graph.
+    
+    Args:
+        interface_files: List of interface files
+        dependency_graph: Dict mapping from file to list of dependency files
+        
+    Returns:
+        List of lists: Each inner list contains files that can be compiled in parallel
+    """
+    # Create a copy of the dependency graph for modification
+    remaining_files = list(interface_files)
+    processed = set()
+    result_layers = []
+    
+    # Use a simple algorithm: repeatedly find files with satisfied dependencies
+    max_iterations = len(interface_files) + 1  # Prevent infinite loops
+    
+    for _ in range(max_iterations):
+        if not remaining_files:
+            break
+            
+        # Find files with no remaining dependencies
+        ready_files = []
+        for file in remaining_files:
+            deps = dependency_graph.get(file, [])
+            deps_satisfied = True
+            for dep in deps:
+                if dep not in processed:
+                    deps_satisfied = False
+                    break
+            if deps_satisfied:
+                ready_files.append(file)
+        
+        if not ready_files:
+            # This indicates a circular dependency or other issue
+            # For safety, fall back to including all remaining files in one layer
+            fail("Circular dependency detected in module_dependencies or unresolved dependencies. Please check your dependency declarations.")
+        
+        # Add ready files to current layer
+        result_layers.append(ready_files)
+        
+        # Mark files as processed and remove them from remaining
+        for file in ready_files:
+            processed.add(file)
+        
+        # Remove processed files from remaining list
+        new_remaining = []
+        for f in remaining_files:
+            if f not in processed:
+                new_remaining.append(f)
+        remaining_files = new_remaining
+    
+    return result_layers
+
+def sort_module_interface_files_with_dependencies(interface_files, module_dependencies):
+    """Sorts module interface files based on explicit dependencies for parallel compilation.
+    
+    This function replaces the simple partition-first sorting with dependency-aware
+    topological sorting, enabling parallel compilation of independent modules.
+    
+    Args:
+        interface_files: List of interface files to sort
+        module_dependencies: Dict mapping module keys to dependency lists
+        
+    Returns:
+        List of lists: Each inner list contains files that can be compiled in parallel
+    """
+    if not module_dependencies:
+        # Fall back to simple partition-first ordering if no dependencies declared
+        return [sort_module_interface_files(interface_files)]
+    
+    # Build dependency graph
+    dependency_graph = _build_dependency_graph(interface_files, module_dependencies)
+    
+    # Perform topological sort
+    return _topological_sort(interface_files, dependency_graph)
+
 def sort_module_interface_files(interface_files):
     """Sorts module interface files so that partition modules come first, followed by main modules.
 
@@ -327,14 +459,13 @@ def sort_module_interface_files(interface_files):
     return partition_modules + main_modules
 
 def compile_module_interfaces(ctx, cc_toolchain, feature_configuration, interface_files, module_compilation_infos, compilation_contexts, current_target_headers):
-    """Compiles multiple C++ module interface files, ensuring partitions are built before main modules.
+    """Compiles multiple C++ module interface files with support for parallel compilation.
 
-    If there are partitions, partition files must be compiled first, so sorting is needed.
-    Partition modules come first, for example:
-    ├── MyModule.ixx            # Main module: export module MyModule;
-    ├── MyModule-part1.ixx      # Partition: export module MyModule:Part1;
-    ├── MyModule-part2.ixx      # Partition: export module MyModule:Part2;
-    Additionally, a cc_module_library can only have 1 main module.
+    This function now supports parallel compilation based on explicit module dependencies
+    declared in the module_dependencies attribute. If module_dependencies is provided,
+    modules will be compiled in topological order with parallel compilation of independent modules.
+    If not provided, falls back to simple partition-first ordering for compatibility.
+
     Args:
         ctx: Rule context
         cc_toolchain: C++ toolchain
@@ -351,25 +482,46 @@ def compile_module_interfaces(ctx, cc_toolchain, feature_configuration, interfac
     """
     current_module_compilation_infos = []
 
-    # All module dependency information, because later compiled modules like partition modules will depend on earlier modules like main modules
+    # All module dependency information, because later compiled modules will depend on earlier modules
     all_module_compilation_infos = module_compilation_infos[:]
-    interface_files = sort_module_interface_files(interface_files)
-    for interface_file in interface_files:
-        module_name = get_module_name_from_file(interface_file)
-        
-        # Compile single module interface
-        module_compilation_info = compile_single_module_interface(
-            ctx = ctx,
-            cc_toolchain = cc_toolchain,
-            feature_configuration = feature_configuration,
-            module_name = module_name,
-            interface_file = interface_file,
-            module_compilation_infos = all_module_compilation_infos,
-            compilation_contexts = compilation_contexts,
-            current_target_headers = current_target_headers,
-        )
-        all_module_compilation_infos.append(module_compilation_info)
-        current_module_compilation_infos.append(module_compilation_info)
+    
+    # Get module dependencies from context if available
+    module_dependencies = {}
+    if hasattr(ctx.attr, "module_dependencies") and ctx.attr.module_dependencies:
+        module_dependencies = ctx.attr.module_dependencies
+    
+    # Sort interface files based on dependencies for parallel compilation
+    if module_dependencies:
+        # Use dependency-aware topological sorting for parallel compilation
+        compilation_layers = sort_module_interface_files_with_dependencies(interface_files, module_dependencies)
+    else:
+        # Fall back to simple partition-first ordering for compatibility
+        sorted_files = sort_module_interface_files(interface_files)
+        compilation_layers = [sorted_files]  # Single layer, sequential compilation
+    
+    # Compile modules layer by layer
+    for layer in compilation_layers:
+        # All modules in the same layer can be compiled in parallel
+        # Note: Bazel will automatically parallelize these actions
+        layer_module_compilation_infos = []
+        for interface_file in layer:
+            module_name = get_module_name_from_file(interface_file)
+            
+            # Compile single module interface
+            module_compilation_info = compile_single_module_interface(
+                ctx = ctx,
+                cc_toolchain = cc_toolchain,
+                feature_configuration = feature_configuration,
+                module_name = module_name,
+                interface_file = interface_file,
+                module_compilation_infos = all_module_compilation_infos,
+                compilation_contexts = compilation_contexts,
+                current_target_headers = current_target_headers,
+            )
+            # Add module compilation info to current layer
+            layer_module_compilation_infos.append(module_compilation_info)
+        all_module_compilation_infos.extend(layer_module_compilation_infos)
+        current_module_compilation_infos.extend(layer_module_compilation_infos)
 
     return current_module_compilation_infos
 
@@ -444,7 +596,6 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
         quote_include_directories = depset(merged_compilation_context.quote_includes.to_list()),
         system_include_directories = depset(cc_helper.system_include_dirs(ctx, additional_make_variable_substitutions) + merged_compilation_context.system_includes.to_list()),
         preprocessor_defines = depset(merged_compilation_context.defines.to_list() + ctx.attr.defines),
-        add_legacy_cxx_options = True,  # Ensure legacy C++ options are included
     )
     
     # Get the same compilation command line as cc_common.compile
@@ -469,6 +620,12 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
     # Build final compilation arguments
     compile_args = ctx.actions.args()
     
+    # Always use param file for module compilation
+    # This ensures consistent behavior and avoids command line length issues
+    # Bazel will automatically create and manage the params file
+    compile_args.use_param_file("@%s", use_always = True)
+    compile_args.set_param_file_format("multiline")
+    
     # Add base compilation options (standard options from cc_common), filter out -c file, will add later
     for option in base_compiler_options:
         # Filter out -c, /c and the file argument that follows it
@@ -483,7 +640,7 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
     # We only need to add module interface file output arguments
     if is_msvc:
         # MSVC compiler: add interface file output
-        compile_args.add("/ifcOutput", ifc_file.path)
+        compile_args.add("/ifcOutput"+ifc_file.path)
         compile_args.add("/c", interface_file.path) 
     else:
         # GCC/Clang compilers: add module output
@@ -501,8 +658,9 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
     
     # Add headers from compilation context as inputs
     # Include both dependency headers and current target headers
-    if merged_compilation_context.headers:
-        transitive_inputs.append(merged_compilation_context.headers)
+    # too many headers in deps
+    # if merged_compilation_context.headers:
+    #     transitive_inputs.append(merged_compilation_context.headers)
     if current_target_headers:
         direct_inputs.extend(current_target_headers)
     
@@ -511,7 +669,9 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
         direct = direct_inputs,
         transitive = transitive_inputs
     )
-
+    
+    # For Args objects, Bazel automatically handles param files when needed
+    # The use_param_file argument can be used to control this behavior
     # Execute compilation
     # This method ensures that module interface compilation uses exactly the same toolchain settings
     # as regular C++ compilation, including all feature flags, optimization options, and platform-specific configurations
@@ -520,7 +680,7 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
         arguments = [compile_args],
         env = env,
         inputs = all_inputs,
-        outputs = [ifc_file, obj_file],
+        outputs = [ifc_file, obj_file],  # Bazel automatically manages params file
         mnemonic = "CppModuleCompile",
         progress_message = "Compiling C++ module {} from {}".format(module_name, interface_file.basename),
     )
@@ -632,172 +792,7 @@ cc_module_library = rule(
     ```
     """,
     implementation = _cc_module_library_impl,
-    attrs = {
-        "hdrs": attr.label_list(
-            allow_files = CC_HEADER,
-            doc = """
-            List of public header files.
-
-            These header files will be included in the compilation context and can be used by other targets
-            that depend on this library.
-            Supported file extensions: .h, .hh, .hpp, .ipp, .hxx, .h++
-            """,
-        ),
-        "module_interfaces": attr.label_list(
-            allow_files = CC_MODULE,
-            doc = """
-            List of C++ module interface files.
-
-            Supported file extensions: .ixx, .cppm, .mpp
-            
-            Module naming rules:
-            - File name determines module name: foo.ixx -> module name "foo"
-            - Partition modules use hyphens: foo-part.ixx -> module name "foo:part"
-            
-            Compilation order:
-            - Partition modules will be compiled before main modules
-            - Dependencies are handled automatically through module declarations
-            
-            Examples:
-            - ["math.ixx"] -> single module "math"
-            - ["math-algebra.ixx", "math-geometry.ixx", "math.ixx"] -> 
-              partition modules "math:algebra", "math:geometry" and main module "math"
-            """,
-        ),
-        "srcs": attr.label_list(
-            allow_files = CC_SOURCE + CC_HEADER,
-            doc = """
-            List of C++ source and header files.
-
-            These are C++ implementation files and private header files that will be compiled together with module interface files.
-            Supported source file extensions: .cc, .cpp, .cxx, .c++
-            Supported header file extensions: .h, .hh, .hpp, .ipp, .hxx, .h++
-            
-            Header files included in srcs are treated as private headers and will not be propagated to targets that depend on this library.
-            Use the hdrs attribute for public headers that should be available to dependent targets.
-            
-            Note: Source files can import modules defined in module_interfaces.
-            """,
-        ),
-        "additional_linker_inputs": attr.label_list(
-            allow_files = True,
-            doc = """
-            Additional linker input files.
-
-            These files will be provided as additional inputs to the linker during the linking phase.
-            Usually used for linker scripts, additional library files, etc.
-            """,
-        ),
-        "deps": attr.label_list(
-            allow_empty = True,
-            providers = [[CcInfo], [CcInfo, ModuleInfo]],
-            doc = """
-            List of other C++ targets to depend on.
-
-            Can depend on:
-            - Other cc_module_library targets (module dependencies will be handled automatically)
-            - Standard cc_library targets
-            - Any target that provides CcInfo
-            
-            Module dependencies will be automatically propagated and handled.
-            """,
-        ),
-        "includes": attr.string_list(
-            doc = """
-            List of include paths.
-
-            These paths will be added to the compilation command's -I arguments.
-            Paths are relative to the current BUILD file's package.
-            """,
-        ),
-        "quote_includes": attr.string_list(
-            doc = """
-            List of quote include paths.
-
-            These paths will be added to the compilation command's -iquote arguments (for supported compilers).
-            Used for #include "..." style includes.
-            """,
-        ),
-        "defines": attr.string_list(
-            doc = """
-            List of preprocessor macro definitions.
-
-            Each string will be added to the compilation command's -D arguments.
-            Examples: ["DEBUG=1", "FEATURE_ENABLED"]
-            """,
-        ),
-        "copts": attr.string_list(
-            doc = """
-            List of compilation options.
-
-            These options will be added to the C++ compilation command. For C++ modules, you usually need to specify the C++ standard:
-            - MSVC: ["/std:c++20"] or ["/std:c++latest"]
-            - GCC/Clang: ["-std=c++20"] or ["-std=c++23"]
-            
-            Other common options:
-            - Optimization: ["/O2"] (MSVC) or ["-O2"] (GCC/Clang)
-            - Debug: ["/Zi"] (MSVC) or ["-g"] (GCC/Clang)
-            """,
-        ),
-        "cxxopts": attr.string_list(
-            doc = """
-            List of C++-specific compilation options.
-
-            These options will be added only when compiling C++ source files (.cpp, .cxx, .cc).
-            They will not be applied to C source files (.c).
-            
-            Examples:
-            - MSVC: ["/std:c++latest", "/permissive-"]
-            - GCC/Clang: ["-std=c++20", "-fno-rtti"]
-            """,
-        ),
-        "conlyopts": attr.string_list(
-            doc = """
-            List of C-specific compilation options.
-
-            These options will be added only when compiling C source files (.c).
-            They will not be applied to C++ source files (.cpp, .cxx, .cc).
-            
-            Examples:
-            - MSVC: ["/TC"]
-            - GCC/Clang: ["-std=c99", "-Wstrict-prototypes"]
-            """,
-        ),
-        "linkopts": attr.string_list(
-            doc = """
-            List of linker options.
-
-            These options will be added to the linking command.
-            Examples: ["/SUBSYSTEM:CONSOLE"] (MSVC) or ["-pthread"] (GCC/Clang)
-            """,
-        ),
-        "linkstatic": attr.bool(
-            default = True,
-            doc = """
-            Whether to create a static library.
-
-            - True (default): Create static library (.a/.lib)
-            - False: Create dynamic library (.so/.dll) if supported
-            
-            Note: Module libraries usually use static linking.
-            """,
-        ),
-        "alwayslink": attr.bool(
-            default = False,
-            doc = """
-            Whether to always link this library.
-
-            - True: Link all symbols from this library even if not directly referenced
-            - False (default): Only link referenced symbols
-            
-            May need to be set to True for module libraries containing global initialization code.
-            """,
-        ),
-        "_cc_toolchain": attr.label(
-            default = "@bazel_tools//tools/cpp:current_cc_toolchain",
-            doc = "Internal C++ toolchain reference for internal use.",
-        ),
-    },
+    attrs = cc_module_library_attrs(),
     fragments = ["cpp"],
     toolchains = ["@bazel_tools//tools/cpp:toolchain_type"],
 )
@@ -991,194 +986,7 @@ cc_module_binary = rule(
     ```
     """,
     implementation = _cc_module_binary_impl,
-    attrs = {
-        "srcs": attr.label_list(
-            allow_files = CC_SOURCE + CC_HEADER,
-            doc = """
-            List of C++ source and header files.
-
-            Contains main() function and other application logic source files, plus any private header files.
-            Supported source file extensions: .cc, .cpp, .cxx, .c++
-            Supported header file extensions: .h, .hh, .hpp, .ipp, .hxx, .h++
-            
-            Header files included in srcs are treated as private headers for the binary.
-            
-            Source files can:
-            - Contain the main() function
-            - Import modules defined in module_interfaces or deps
-            - Use traditional #include header files
-            """,
-        ),
-        "module_interfaces": attr.label_list(
-            allow_files = CC_MODULE,
-            doc = """
-            List of application-level C++ module interface files (optional).
-
-            Usually binary files don't need to export module interfaces, but may be useful in some cases:
-            - Internal modular organization of applications
-            - Interface definitions in plugin architectures
-            
-            Supported file extensions: .ixx, .cppm, .mpp
-            Module naming and partition rules are the same as cc_module_library.
-            """,
-        ),
-        "additional_linker_inputs": attr.label_list(
-            allow_files = True,
-            doc = """
-            Additional linker input files.
-
-            These files will be provided as additional inputs to the linker during the linking phase.
-            For executables, commonly used for:
-            - Resource files
-            - Version information files
-            - Linker scripts
-            """,
-        ),
-        "deps": attr.label_list(
-            allow_empty = True,
-            providers = [[CcInfo], [CcInfo, ModuleInfo]],
-            doc = """
-            List of other C++ targets to depend on.
-
-            Can depend on:
-            - cc_module_library targets (recommended, module dependencies will be handled automatically)
-            - Standard cc_library targets
-            - Any target that provides CcInfo
-            
-            Module dependencies will be automatically propagated, ensuring all required module interface files are available.
-            """,
-        ),
-        "data": attr.label_list(
-            default = [],
-            allow_files = True,
-            doc = """
-            List of runtime data files.
-
-            These files will be included in the executable's runtime environment.
-            Commonly used for:
-            - Configuration files
-            - Resource files
-            - Test data
-            """,
-        ),
-        "includes": attr.string_list(
-            doc = """
-            List of include paths.
-
-            These paths will be added to the compilation command's -I arguments.
-            Paths are relative to the current BUILD file's package.
-            """,
-        ),
-        "quote_includes": attr.string_list(
-            doc = """
-            List of quote include paths.
-
-            These paths will be added to the compilation command's -iquote arguments (for supported compilers).
-            Used for #include "..." style includes.
-            """,
-        ),
-        "defines": attr.string_list(
-            doc = """
-            List of preprocessor macro definitions.
-
-            Each string will be added to the compilation command's -D arguments.
-            Examples: ["VERSION=1.0", "RELEASE_BUILD"]
-            """,
-        ),
-        "copts": attr.string_list(
-            doc = """
-            List of compilation options.
-
-            These options will be added to the C++ compilation command. For C++ modules, you must specify a supported C++ standard:
-            - MSVC: ["/std:c++20"] or ["/std:c++latest"]
-            - GCC/Clang: ["-std=c++20"] or ["-std=c++23"]
-            
-            Other common options:
-            - Optimization: ["/O2"] (MSVC) or ["-O2"] (GCC/Clang)
-            - Debug: ["/Zi"] (MSVC) or ["-g"] (GCC/Clang)
-            """,
-        ),
-        "cxxopts": attr.string_list(
-            doc = """
-            List of C++-specific compilation options.
-
-            These options will be added only when compiling C++ source files (.cpp, .cxx, .cc).
-            They will not be applied to C source files (.c).
-            
-            Examples:
-            - MSVC: ["/std:c++latest", "/permissive-"]
-            - GCC/Clang: ["-std=c++20", "-fno-rtti"]
-            """,
-        ),
-        "conlyopts": attr.string_list(
-            doc = """
-            List of C-specific compilation options.
-
-            These options will be added only when compiling C source files (.c).
-            They will not be applied to C++ source files (.cpp, .cxx, .cc).
-            
-            Examples:
-            - MSVC: ["/TC"]
-            - GCC/Clang: ["-std=c99", "-Wstrict-prototypes"]
-            """,
-        ),
-        "linkopts": attr.string_list(
-            doc = """
-            List of linker options.
-
-            These options will be added to the linking command.
-            For executables, common options:
-            - Windows: ["/SUBSYSTEM:CONSOLE"] or ["/SUBSYSTEM:WINDOWS"]
-            - Linux: ["-pthread"] for multithreading support
-            """,
-        ),
-        "linkstatic": attr.bool(
-            default = True,
-            doc = """
-            Whether to statically link dependency libraries.
-
-            - True (default): Statically link all dependencies, generating standalone executable
-            - False: Dynamically link dependencies, requires runtime library support
-            
-            For C++ module applications, static linking is usually recommended.
-            """,
-        ),
-        "linkshared": attr.bool(
-            default = False,
-            doc = """
-            Whether to create a shared library instead of an executable.
-
-            - False (default): Create executable
-            - True: Create dynamic library (.so/.dll)
-            
-            Usually used for creating plugins or shared modules.
-            """,
-        ),
-        "stamp": attr.int(
-            default = -1,
-            doc = """
-            Whether to embed build information in the binary file.
-
-            - -1 (default): Decided by --stamp flag
-            - 0: Don't embed build information
-            - 1: Always embed build information (build time, version, etc.)
-            """,
-        ),
-        "malloc": attr.label(
-            default = "@bazel_tools//tools/cpp:malloc",
-            providers = [CcInfo],
-            doc = """
-            Custom memory allocator.
-
-            Uses the system's standard malloc implementation by default.
-            Can specify a custom memory allocator implementation.
-            """,
-        ),
-        "_cc_toolchain": attr.label(
-            default = "@bazel_tools//tools/cpp:current_cc_toolchain",
-            doc = "Internal C++ toolchain reference for internal use.",
-        ),
-    },
+    attrs = cc_module_binary_attrs(),
     fragments = ["cpp"],
     toolchains = ["@bazel_tools//tools/cpp:toolchain_type"],
     executable = True,  # This tells Bazel this rule can create executable targets

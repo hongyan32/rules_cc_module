@@ -133,9 +133,34 @@ Current implementation compilation flow:
    - MSVC: `/reference module=module.ifc`
    - Clang: `-fmodule-file=module=module.pcm`
 
-3. **Partition compilation order**: Automatically detects and prioritizes partition module compilation
+3. **Module dependency and parallel compilation**: 
+   - Automatic partition module detection and prioritization
+   - User-declared dependencies via `module_dependencies` attribute
+   - Topological sorting for optimal compilation order
+   - Parallel compilation of independent modules
 
 4. **Linking stage**: Integrates generated object files and module files into final executable
+
+## Parallel Compilation Design
+
+The project implements parallel compilation of C++ modules through explicit dependency declarations:
+
+### Dependency Declaration System
+- **User-declared dependencies**: Users declare module dependencies via the `module_dependencies` attribute
+- **Flexible key format**: Supports both file names (`"math.ixx"`) and module names (`"math"`) as keys
+- **Mixed dependency types**: Dependencies can reference either file names or module names
+- **Default behavior**: Modules without declared dependencies are treated as having no dependencies
+
+### Compilation Algorithm
+1. **Dependency graph construction**: Builds a dependency graph from user declarations
+2. **Topological sorting**: Performs dependency-aware topological sort to create compilation layers
+3. **Parallel execution**: Modules in the same layer can be compiled simultaneously
+
+### Benefits
+- **Improved build performance**: Independent modules compile in parallel
+- **Explicit control**: Users have full control over compilation order
+- **Backward compatibility**: Existing code without `module_dependencies` continues to work
+- **Error prevention**: Prevents compilation errors from missing dependencies
 
 ## Implemented Advanced Features
 
@@ -148,6 +173,9 @@ Current implementation compilation flow:
 ### 2. Module System Features
 - ✅ **Module partitions**: Hyphens in filenames automatically converted to module partitions (`module-part.ixx` → `module:part`)
 - ✅ **Compilation order**: Partition modules compiled before main modules
+- ✅ **Parallel compilation**: User-declared dependencies enable parallel compilation of independent modules
+- ✅ **Dependency declaration**: Support for both file names and module names in dependency declarations
+- ✅ **Topological sorting**: Automatic dependency-aware compilation ordering
 - ✅ **Dependency propagation**: Module dependencies automatically propagated to dependent targets
 
 ### 3. Toolchain Integration
@@ -181,7 +209,7 @@ Current implementation compilation flow:
    - Add debug information support
 
 3. **Performance optimization**
-   - Parallel module compilation optimization
+   - ✅ **Parallel module compilation**: Implemented via explicit dependency declarations
    - Incremental compilation support
    - Cache optimization
 
