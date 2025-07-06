@@ -646,7 +646,7 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
         # GCC/Clang compilers: add module output
         compile_args.add("-fmodule-output=" + ifc_file.path)
         # Here we need to change "-c ixxfile" to "-x c++-module -c ixxfile", additionally specify module file with -x c++-module
-        compile_args.add("-x", "c++-module")
+        compile_args.add("-x" + "c++-module")
         compile_args.add("-c", interface_file.path)  # Ensure compiler knows this is a module interface file
     # Collect all input files efficiently using depsets
     direct_inputs = [interface_file]
