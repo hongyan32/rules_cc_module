@@ -104,6 +104,58 @@ def _filter_none(input_list):
             filtered_list.append(element)
     return filtered_list
 
+def _get_target_sub_dir(target_name):
+    """Get the subdirectory part of a target name."""
+    last_separator = target_name.rfind("/")
+    if last_separator == -1:
+        return ""
+    return target_name[0:last_separator]
+
+def _matches(extensions, target):
+    """Check if target filename matches any of the given extensions."""
+    for extension in extensions:
+        if target.endswith(extension):
+            return True
+    return False
+
+def _get_dynamic_library_for_runtime_or_none(library_to_link, link_statically):
+    """Get dynamic library from library_to_link if it should be used at runtime."""
+    if library_to_link.dynamic_library == None:
+        return None
+    if link_statically and (library_to_link.static_library != None or library_to_link.pic_static_library != None):
+        return None
+    return library_to_link.dynamic_library
+
+def _get_dynamic_libraries_for_runtime(link_statically, libraries):
+    """Get all dynamic libraries that are needed at runtime."""
+    dynamic_libraries_for_runtime = []
+    for library_to_link in libraries:
+        artifact = _get_dynamic_library_for_runtime_or_none(library_to_link, link_statically)
+        if artifact != None:
+            dynamic_libraries_for_runtime.append(artifact)
+    return dynamic_libraries_for_runtime
+
+def _create_dynamic_libraries_copy_actions(ctx, dynamic_libraries_for_runtime):
+    """Create actions to copy dynamic libraries to the binary's directory."""
+    result = []
+    for lib in dynamic_libraries_for_runtime:
+        # If the binary and the DLL don't belong to the same package or the DLL is a source file,
+        # we should copy the DLL to the binary's directory.
+        if ctx.label.package != lib.owner.package or ctx.label.workspace_name != lib.owner.workspace_name or lib.is_source:
+            target_name = ctx.label.name
+            target_sub_dir = _get_target_sub_dir(target_name)
+            copy_file_path = lib.basename
+            if target_sub_dir != "":
+                copy_file_path = target_sub_dir + "/" + copy_file_path
+            copy = ctx.actions.declare_file(copy_file_path)
+            ctx.actions.symlink(output = copy, target_file = lib, progress_message = "Copying Execution Dynamic Library")
+            result.append(copy)
+        else:
+            # If the library is already in the same directory as the binary, we don't need to copy it,
+            # but we still add it to the result.
+            result.append(lib)
+    return depset(result)
+
 def _cc_module_library_impl(ctx):
     cc_toolchain = find_cpp_toolchain(ctx)
     feature_configuration = cc_common.configure_features(
@@ -239,6 +291,7 @@ def _cc_module_library_impl(ctx):
 
     # Check if we have any actual compilation outputs to link
     has_compilation_outputs = not cc_helper.is_compilation_outputs_empty(compilation_outputs)
+    library = None  # Initialize library variable
     
     if has_compilation_outputs:
         # Normal case: we have object files to link
@@ -276,16 +329,18 @@ def _cc_module_library_impl(ctx):
         files = []
 
     # Return providers
+    # Simple runfiles handling for library - just pass through data files
+    runfiles = ctx.runfiles(files = ctx.files.data)
+    
     providers = [
         DefaultInfo(
             files = depset(_filter_none(files)),
-            runfiles = ctx.runfiles(files = ctx.files.data),
+            runfiles = runfiles,
         ),
         CcInfo(
             compilation_context = compilation_context,
             linking_context = linking_context,
         ),
-        # Add ModuleInfo provider
         ModuleInfo(
             module_dependencies = all_module_dependencies
         ),
@@ -820,6 +875,7 @@ def _cc_module_binary_impl(ctx):
     # Filter headers from srcs (following Bazel's standard approach)
     private_hdrs, actual_srcs = _filter_headers_from_srcs(ctx.files.srcs)
     
+    # ========== Module-specific handling ==========
     # Collect module compilation contexts, not including current module information yet
     module_compilation_infos = []
     for dep in ctx.attr.deps:
@@ -827,7 +883,7 @@ def _cc_module_binary_impl(ctx):
             # Extract all module compilation information from ModuleInfo
             module_compilation_infos.extend(dep[ModuleInfo].module_dependencies.to_list())
 
-    # If there are module interface files, compile all module interface files in order
+    # Compile module interfaces if present
     current_module_compilation_infos = []
     if hasattr(ctx.attr, "module_interfaces") and ctx.attr.module_interfaces:
         current_module_compilation_infos = compile_module_interfaces(
@@ -840,7 +896,7 @@ def _cc_module_binary_impl(ctx):
             current_target_headers = private_hdrs,  # cc_module_binary uses private headers from srcs
         )
 
-    # Collect all module object files for regular compilation
+    # Collect current module object files for regular compilation
     module_obj_files = []
     for module_info in current_module_compilation_infos:
         module_obj_files.append(module_info.obj_file)
@@ -864,7 +920,7 @@ def _cc_module_binary_impl(ctx):
     cxx_flags = []
     cxx_flags.extend(ctx.attr.cxxopts)  # Rule-level C++ compilation options
 
-    # cxx_flags.extend(ctx.fragments.cpp.cxxopts)  # 这个会自动添加，
+    # cxx_flags.extend(ctx.fragments.cpp.cxxopts)  # This will be added automatically
     
     user_compile_flags = []
     user_compile_flags.extend(ctx.attr.copts)  # Rule-level compilation options
@@ -872,7 +928,6 @@ def _cc_module_binary_impl(ctx):
 
 
     additional_make_variable_substitutions = cc_helper.get_toolchain_global_make_variables(cc_toolchain)
-    user_link_flags = cc_helper.linkopts(ctx, additional_make_variable_substitutions, cc_toolchain)
 
     # Regular C++ compilation
     (_compilation_context, compilation_outputs) = cc_common.compile(
@@ -894,7 +949,7 @@ def _cc_module_binary_impl(ctx):
     
     # Add module object files to compilation outputs
     if module_obj_files:
-        # Create new compilation outputs including original object files and module object files
+    # Create new compilation outputs including original object files and module object files
         all_objects_depset = depset(
             direct = module_obj_files,
             transitive = [depset(compilation_outputs.objects)]
@@ -907,41 +962,139 @@ def _cc_module_binary_impl(ctx):
     output_type = "dynamic_library" if ctx.attr.linkshared else "executable"
     
     # Process link flags using cc_helper directly
-    additional_make_variable_substitutions = cc_helper.get_toolchain_global_make_variables(cc_toolchain)
     user_link_flags = cc_helper.linkopts(ctx, additional_make_variable_substitutions, cc_toolchain)
 
-    malloc = ctx.attr.malloc
-    linking_contexts.append(malloc[CcInfo].linking_context)
+    # Handle malloc
+    if ctx.attr.malloc:
+        linking_contexts.append(ctx.attr.malloc[CcInfo].linking_context)
+
+    # Determine the libraries to link in.
+    # First libraries from srcs. Shared library artifacts here are substituted with mangled symlink
+    # artifacts generated by getDynamicLibraryLink(). This is done to minimize number of -rpath
+    # entries during linking process.
+    precompiled_files = cc_helper.build_precompiled_files(ctx)
+    libraries_for_current_cc_linking_context = []
+    for libs in precompiled_files:
+        for artifact in libs:
+            if _matches([".so", ".dylib", ".dll", ".ifso", ".tbd", ".lib", ".dll.a"], artifact.basename) or cc_helper.is_valid_shared_library_artifact(artifact):
+                library_to_link = cc_common.create_library_to_link(
+                    actions = ctx.actions,
+                    feature_configuration = feature_configuration,
+                    cc_toolchain = cc_toolchain,
+                    dynamic_library = artifact,
+                )
+                libraries_for_current_cc_linking_context.append(library_to_link)
+            elif _matches([".pic.lo", ".lo", ".lo.lib"], artifact.basename):
+                library_to_link = cc_common.create_library_to_link(
+                    actions = ctx.actions,
+                    feature_configuration = feature_configuration,
+                    cc_toolchain = cc_toolchain,
+                    static_library = artifact,
+                    alwayslink = True,
+                )
+                libraries_for_current_cc_linking_context.append(library_to_link)
+            elif _matches([".a", ".lib", ".pic.a", ".rlib"], artifact.basename) and not _matches([".if.lib"], artifact.basename):
+                library_to_link = cc_common.create_library_to_link(
+                    actions = ctx.actions,
+                    feature_configuration = feature_configuration,
+                    cc_toolchain = cc_toolchain,
+                    static_library = artifact,
+                )
+                libraries_for_current_cc_linking_context.append(library_to_link)
+
+    linker_inputs = cc_common.create_linker_input(
+        owner = ctx.label,
+        libraries = depset(libraries_for_current_cc_linking_context),
+        user_link_flags = cc_helper.linkopts(ctx, additional_make_variable_substitutions, cc_toolchain) ,
+        additional_inputs = depset(cc_helper.linker_scripts(ctx)),
+    )
+
+    current_cc_linking_context = cc_common.create_linking_context(linker_inputs = depset([linker_inputs]))
+    cc_info_current_cc_linking_context = cc_common.merge_cc_infos(cc_infos = [CcInfo(linking_context = current_cc_linking_context)])
+    linking_contexts.append(cc_info_current_cc_linking_context.linking_context)
 
     linking_outputs = cc_common.link(
         name = ctx.label.name,
         actions = ctx.actions,
         feature_configuration = feature_configuration,
         cc_toolchain = cc_toolchain,
-        language = "c++",
+        # language = "c++",
         compilation_outputs = compilation_outputs,
         linking_contexts = linking_contexts,
         user_link_flags = user_link_flags,
         link_deps_statically = ctx.attr.linkstatic,
-        stamp = ctx.attr.stamp,
+        stamp = cc_helper.is_stamping_enabled(ctx),
         additional_inputs = ctx.files.additional_linker_inputs,
         output_type = output_type,
     )
+
+    # ========== Return providers ==========
     files = []
     executable = None
     if output_type == "executable":
         files.append(linking_outputs.executable)
-        executable = linking_outputs.executable  # Set executable for bazel run
+        executable = linking_outputs.executable
     elif output_type == "dynamic_library":
-        files.append(linking_outputs.library_to_link.dynamic_library)
-        files.append(linking_outputs.library_to_link.resolved_symlink_dynamic_library)
+        if linking_outputs.library_to_link.dynamic_library:
+            files.append(linking_outputs.library_to_link.dynamic_library)
+        if linking_outputs.library_to_link.resolved_symlink_dynamic_library:
+            files.append(linking_outputs.library_to_link.resolved_symlink_dynamic_library)
 
-    # Return providers, add ModuleInfo provider
+    # ========== DLL copy logic (based on cc_binary's implementation) ==========
+    # Determine if it is static linking mode
+    is_static_mode = ctx.attr.linkstatic
+    
+    # Collect all dynamic libraries needed at runtime
+    all_libraries = []
+    
+    # Collect all libraries from linking contexts
+    for linking_context in linking_contexts:
+        for linker_input in linking_context.linker_inputs.to_list():
+            all_libraries.extend(linker_input.libraries)
+    
+    # If the copy_dynamic_libraries_to_binary feature is enabled, copy DLLs
+    copied_runtime_dynamic_libraries = None
+    if cc_common.is_enabled(feature_configuration = feature_configuration, feature_name = "copy_dynamic_libraries_to_binary"):
+        dynamic_libraries_for_runtime = _get_dynamic_libraries_for_runtime(is_static_mode, all_libraries)
+        copied_runtime_dynamic_libraries = _create_dynamic_libraries_copy_actions(ctx, dynamic_libraries_for_runtime)
+
+    # Collect runfiles
+    runfiles_files = []
+    runfiles_files.extend(ctx.files.data)
+    
+    # Collect transitive runfiles
+    transitive_runfiles = []
+    for dep in ctx.attr.deps:
+        if DefaultInfo in dep and dep[DefaultInfo].default_runfiles:
+            transitive_runfiles.append(dep[DefaultInfo].default_runfiles)
+
+    # Add the current linking output dynamic library to runfiles
+    if output_type == "executable" and linking_outputs.library_to_link:
+        lib = linking_outputs.library_to_link
+        if lib.dynamic_library:
+            runfiles_files.append(lib.dynamic_library)
+        if lib.resolved_symlink_dynamic_library:
+            runfiles_files.append(lib.resolved_symlink_dynamic_library)
+    
+    # Use cc_helper's standard method to collect dependent dynamic libraries
+    for linking_context in linking_contexts:
+        dynamic_libs = cc_helper.get_dynamic_libraries_for_runtime(linking_context, is_static_mode)
+        runfiles_files.extend(dynamic_libs)
+
+    # Prepare the final file list
+    final_files = list(files)
+    if copied_runtime_dynamic_libraries:
+        final_files.extend(copied_runtime_dynamic_libraries.to_list())
+
+    runfiles = ctx.runfiles(
+        files = runfiles_files,
+    ).merge_all(transitive_runfiles)
+
     providers = [
         DefaultInfo(
-            files = depset(_filter_none(files)),
-            executable = executable,  # This tells Bazel this is an executable target
-            runfiles = ctx.runfiles(files = ctx.files.data),
+            files = depset(final_files),
+            executable = executable,
+            runfiles = runfiles,
         ),
         ModuleInfo(
             module_dependencies = all_module_dependencies

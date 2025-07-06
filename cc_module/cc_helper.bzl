@@ -72,6 +72,10 @@ extensions = struct(
     DISALLOWED_HDRS_FILES = DISALLOWED_HDRS_FILES,  # Also includes VERSIONED_SHARED_LIBRARY files.
 )
 
+cpp_file_types = struct(
+    LINKER_SCRIPT = ["ld", "lds", "ldscript"],
+)
+
 def _is_compilation_outputs_empty(compilation_outputs):
     return (len(compilation_outputs.pic_objects) == 0 and
             len(compilation_outputs.objects) == 0)
@@ -492,6 +496,99 @@ def _check_cpp_standard_for_modules(ctx):
              "For MSVC, use /std:c++20 or /std:c++latest. " +
              "For GCC/Clang, use -std=c++20 or -std=c++23.")
 
+def _is_stamping_enabled(ctx):
+#   private api
+    # if ctx.configuration.is_tool_configuration():
+    #     return 0
+    stamp = 0
+    if hasattr(ctx.attr, "stamp"):
+        stamp = ctx.attr.stamp
+    return stamp
+
+
+def _build_precompiled_files(ctx):
+    objects = []
+    pic_objects = []
+    static_libraries = []
+    pic_static_libraries = []
+    alwayslink_static_libraries = []
+    pic_alwayslink_static_libraries = []
+    shared_libraries = []
+
+    for src in ctx.files.srcs:
+        short_path = src.short_path
+
+        # For compatibility with existing BUILD files, any ".o" files listed
+        # in srcs are assumed to be position-independent code, or
+        # at least suitable for inclusion in shared libraries, unless they
+        # end with ".nopic.o". (The ".nopic.o" extension is an undocumented
+        # feature to give users at least some control over this.) Note that
+        # some target platforms do not require shared library code to be PIC.
+        if _matches_extension(short_path, OBJECT_FILE):
+            objects.append(src)
+            if not short_path.endswith(".nopic.o"):
+                pic_objects.append(src)
+
+            if _matches_extension(short_path, PIC_OBJECT_FILE):
+                pic_objects.append(src)
+
+        elif _matches_extension(short_path, PIC_ARCHIVE):
+            pic_static_libraries.append(src)
+        elif _matches_extension(short_path, ARCHIVE):
+            static_libraries.append(src)
+        elif _matches_extension(short_path, ALWAYSLINK_PIC_LIBRARY):
+            pic_alwayslink_static_libraries.append(src)
+        elif _matches_extension(short_path, ALWAYSLINK_LIBRARY):
+            alwayslink_static_libraries.append(src)
+        elif _is_valid_shared_library_artifact(src):
+            shared_libraries.append(src)
+    return (
+        objects,
+        pic_objects,
+        static_libraries,
+        pic_static_libraries,
+        alwayslink_static_libraries,
+        pic_alwayslink_static_libraries,
+        shared_libraries,
+    )
+
+_SHARED_LIBRARY_EXTENSIONS = ["so", "dll", "dylib", "wasm"]
+
+def _is_valid_shared_library_artifact(shared_library):
+    if (shared_library.extension in _SHARED_LIBRARY_EXTENSIONS):
+        return True
+    return False
+
+def _linker_scripts(ctx):
+    result = []
+    for dep in ctx.attr.deps:
+        for f in dep.files.to_list():
+            if f.extension in cpp_file_types.LINKER_SCRIPT:
+                result.append(f)
+    return result
+
+def _get_dynamic_libraries_for_runtime(cc_linking_context, linking_statically):
+    libraries = []
+    for linker_input in cc_linking_context.linker_inputs.to_list():
+        libraries.extend(linker_input.libraries)
+
+    dynamic_libraries_for_runtime = []
+    for library in libraries:
+        artifact = _get_dynamic_library_for_runtime_or_none(library, linking_statically)
+        if artifact != None:
+            dynamic_libraries_for_runtime.append(artifact)
+
+    return dynamic_libraries_for_runtime
+
+def _get_dynamic_library_for_runtime_or_none(library, linking_statically):
+    if library.dynamic_library == None:
+        return None
+
+    if linking_statically and (library.static_library != None or library.pic_static_library != None):
+        return None
+
+    return library.dynamic_library
+
 
 cc_helper = struct(
     are_labels_equal = _are_labels_equal,
@@ -505,4 +602,9 @@ cc_helper = struct(
     is_compilation_outputs_empty = _is_compilation_outputs_empty,
     get_toolchain_global_make_variables = _get_toolchain_global_make_variables,
     linkopts = _linkopts,
+    is_stamping_enabled = _is_stamping_enabled,
+    build_precompiled_files = _build_precompiled_files,
+    is_valid_shared_library_artifact = _is_valid_shared_library_artifact,
+    linker_scripts = _linker_scripts,
+    get_dynamic_libraries_for_runtime = _get_dynamic_libraries_for_runtime,
 )
