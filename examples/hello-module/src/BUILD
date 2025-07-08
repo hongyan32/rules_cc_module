@@ -5,6 +5,9 @@ load("@rules_cc_module//cc_module:defs.bzl", "cc_module_library", "cc_module_bin
 cc_module_library(
     name = "std.compat",
     module_interfaces= ["std.ixx","std.compat.ixx"],
+    module_dependencies = {
+        "std.compat": ["std"],
+    },
     features = ["cpp_modules"],
     visibility = ["//visibility:public"]
 )
@@ -23,6 +26,9 @@ cc_module_library(
         "module2/module2.ixx",
         "module2/module2-part.ixx",
     ],
+    module_dependencies = {
+        "module2": ["module2:part"],
+    },
     includes = ["."],  # Include directory for module2
     hdrs = ["module2/header_only.hpp"],  # Include the header-only library
     srcs = glob(["module2/**/*.cpp"]),

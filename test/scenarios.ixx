@@ -1,7 +1,7 @@
 module;
 #include "scenarios_impl.h"
 #include <string>
-#include <iostream>;
+#include <iostream>
 
 export module scenarios;
 

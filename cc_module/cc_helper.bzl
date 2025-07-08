@@ -16,15 +16,12 @@
 
 load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
+load("//cc_module:attrs.bzl", "CC_HEADER", "CC_MODULE", "CC_SOURCE", "C_SOURCE" )
 
-
-CC_SOURCE = [".cc", ".cpp", ".cxx", ".c++", ".C", ".cu", ".cl"]
-C_SOURCE = [".c"]
 OBJC_SOURCE = [".m"]
 OBJCPP_SOURCE = [".mm"]
 CLIF_INPUT_PROTO = [".ipb"]
 CLIF_OUTPUT_PROTO = [".opb"]
-CC_HEADER = [".h", ".hh", ".hpp", ".ipp", ".hxx", ".h++", ".inc", ".inl", ".tlh", ".tli", ".H", ".tcc"]
 ASSESMBLER_WITH_C_PREPROCESSOR = [".S"]
 ASSEMBLER = [".s", ".asm"]
 ARCHIVE = [".a", ".lib"]
@@ -590,6 +587,86 @@ def _get_dynamic_library_for_runtime_or_none(library, linking_statically):
     return library.dynamic_library
 
 
+def _normalize_module_key(key):
+    """Normalize a module key (could be file name or module name) to a module name.
+    
+    This function is consistent with get_module_name_from_file's conversion logic.
+    
+    Args:
+        key: Module key (could be file name like "foo-part.ixx" or module name like "foo:part")
+        
+    Returns:
+        string: Normalized module name
+        
+    Example:
+        "foo-part.ixx" -> "foo:part"
+        "foo-part" -> "foo:part"
+        "foo:part" -> "foo:part"
+        "foo.ixx" -> "foo"
+        "foo" -> "foo"
+    """
+    # Remove file extension if present
+    basename = key
+    for ext in CC_MODULE:
+        if basename.endswith(ext):
+            basename = basename[:-len(ext)]
+            break
+    
+    # Convert first hyphen to colon (for module partition)
+    if "-" in basename:
+        parts = basename.split("-", 1)  # Only split on first hyphen
+        return parts[0] + ":" + parts[1]
+    
+    return basename
+
+def _resolve_module_dependencies_for_compilation(module_name, module_dependencies, module_compilation_infos):
+    """Resolve specific module dependencies for a given module compilation.
+    
+    Args:
+        module_name: The name of the module being compiled
+        module_dependencies: Dict mapping module keys to dependency lists (from module_dependencies attribute)
+        module_compilation_infos: List of ModuleCompilationInfo from dependencies
+        
+    Returns:
+        List of ModuleCompilationInfo objects that this module explicitly depends on
+    """
+    
+    # Find dependencies for the current module
+    resolved_dependencies = []
+
+    if not module_dependencies:
+        # If no explicit dependencies declared, return empty list
+        return resolved_dependencies
+    
+    # Create a mapping of module names to ModuleCompilationInfo
+    name_to_module_info = {}
+    
+    # Add dependency modules
+    for module_info in module_compilation_infos:
+        name_to_module_info[module_info.module_name] = module_info
+    
+    # Try to find the module key in module_dependencies
+    # Normalize both the module name and the keys for comparison
+    module_deps = []
+    
+    for key, deps in module_dependencies.items():
+        normalized_key = _normalize_module_key(key)
+        if normalized_key == module_name:
+            module_deps = deps
+            break
+    
+    # Resolve each dependency
+    for dep_key in module_deps:
+        # Normalize the dependency key
+        normalized_dep_key = _normalize_module_key(dep_key)
+
+        # Try to find by normalized module name
+        if normalized_dep_key in name_to_module_info:
+            resolved_dependencies.append(name_to_module_info[normalized_dep_key])
+    
+    return resolved_dependencies
+
+
 cc_helper = struct(
     are_labels_equal = _are_labels_equal,
     get_srcs = _get_srcs,
@@ -607,4 +684,6 @@ cc_helper = struct(
     is_valid_shared_library_artifact = _is_valid_shared_library_artifact,
     linker_scripts = _linker_scripts,
     get_dynamic_libraries_for_runtime = _get_dynamic_libraries_for_runtime,
+    normalize_module_key = _normalize_module_key,
+    resolve_module_dependencies_for_compilation = _resolve_module_dependencies_for_compilation,
 )
