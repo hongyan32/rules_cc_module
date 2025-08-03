@@ -451,8 +451,9 @@ def _topological_sort(interface_files, dependency_graph):
         
         if not ready_files:
             # This indicates a circular dependency or other issue
-            # For safety, fall back to including all remaining files in one layer
-            fail("Circular dependency detected in module_dependencies or unresolved dependencies. Please check your dependency declarations.")
+            # Print involved file names for easier debugging
+            involved_files = [file.basename for file in remaining_files]
+            fail("Circular dependency or unresolved dependencies detected. Involved files: {}. Please check your dependency declarations.".format(", ".join(involved_files)))
         
         # Add ready files to current layer
         result_layers.append(ready_files)
