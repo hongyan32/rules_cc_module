@@ -134,6 +134,17 @@ def _check_file_extension(file, allowed_extensions):
         return True
     return False
 
+def _get_private_hdrs(ctx):
+    if not hasattr(ctx.attr, "srcs"):
+        return []
+    artifact_label_map = {}
+    for src in ctx.attr.srcs:
+        if DefaultInfo in src:
+            for artifact in src[DefaultInfo].files.to_list():
+                if "." + artifact.extension in CC_HEADER:
+                    artifact_label_map[artifact] = src.label
+    return _map_to_list(artifact_label_map)
+
 def _get_public_hdrs(ctx):
     if not hasattr(ctx.attr, "hdrs"):
         return []
@@ -674,6 +685,7 @@ cc_helper = struct(
     map_to_list = _map_to_list,
     get_cpp_module_interfaces = _get_cpp_module_interfaces,
     check_cpp_modules = _check_cpp_modules,
+    get_private_hdrs = _get_private_hdrs,
     get_public_hdrs = _get_public_hdrs,
     system_include_dirs = _system_include_dirs,
     is_compilation_outputs_empty = _is_compilation_outputs_empty,

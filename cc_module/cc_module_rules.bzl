@@ -563,7 +563,7 @@ def compile_module_interfaces(ctx, cc_toolchain, feature_configuration, interfac
         for interface_file in layer:
             module_name = get_module_name_from_file(interface_file)
             
-            # Compile single module interface with optimized dependency resolution
+            # Compile single module interface
             module_compilation_info = compile_single_module_interface(
                 ctx = ctx,
                 cc_toolchain = cc_toolchain,
@@ -573,7 +573,6 @@ def compile_module_interfaces(ctx, cc_toolchain, feature_configuration, interfac
                 module_compilation_infos = all_module_compilation_infos,
                 compilation_contexts = compilation_contexts,
                 current_target_headers = current_target_headers,
-                module_dependencies = module_dependencies,
             )
             # Add module compilation info to current layer
             layer_module_compilation_infos.append(module_compilation_info)
@@ -582,17 +581,15 @@ def compile_module_interfaces(ctx, cc_toolchain, feature_configuration, interfac
 
     return current_module_compilation_infos
 
-def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, module_name, interface_file, module_compilation_infos, compilation_contexts, current_target_headers, module_dependencies = None):
+def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, module_name, interface_file, module_compilation_infos, compilation_contexts, current_target_headers):
     """
     Compiles a single module interface file, generating .ifc and .obj files.
     
     This function uses cc_common.create_compile_variables and cc_common.get_memory_inefficient_command_line
     to ensure module compilation uses the same toolchain configuration and feature flags as cc_common.compile.
     
-    Optimized dependency resolution:
-    - If module_dependencies is specified, only the explicitly declared dependencies will be included as inputs
-    - Dependencies are resolved from both current_target_modules and module_compilation_infos
-    - This reduces unnecessary file dependencies and improves build performance
+    All transitive module dependencies are included as input files to ensure proper change detection
+    and recompilation when any dependency changes.
     
     Args:
         ctx: Rule context
@@ -603,7 +600,6 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
         module_compilation_infos: List of module compilation information from dependencies
         compilation_contexts: List of compilation contexts (from dependencies)
         current_target_headers: List of header files from the current target (hdrs + private_hdrs)
-        module_dependencies: Optional dict mapping module keys to dependency lists (for optimized input dependency resolution)
         
     Returns:
         ModuleCompilationInfo: Contains compiled .ifc and .obj file information
@@ -636,13 +632,8 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
     all_user_compile_flags.extend(ctx.attr.cxxopts)
     all_user_compile_flags.extend(ctx.fragments.cpp.copts)
     all_user_compile_flags.extend(ctx.fragments.cpp.cxxopts)
-    # Optimized module dependency resolution
-    # Only include explicitly declared dependencies or all dependencies if no explicit declaration
-    direct_module_dependencies = cc_helper.resolve_module_dependencies_for_compilation(
-        module_name, module_dependencies, module_compilation_infos
-    )
     
-    # Create optimized module compilation flags based on resolved dependencies
+    # Create module compilation flags based on all available dependencies
     module_deps_depset = depset(direct = module_compilation_infos)
     # here we need to add all module dependencies, they may be indirectly referenced by current module
     all_user_compile_flags.extend(get_module_compile_flags(cc_toolchain, module_deps_depset))
@@ -714,9 +705,11 @@ def compile_single_module_interface(ctx, cc_toolchain, feature_configuration, mo
     direct_inputs = [interface_file]
     transitive_inputs = []
     
-    # Add only the explicitly resolved module dependency .ifc files as inputs
-    # This reduces unnecessary file dependencies and improves build performance
-    for module_dep in direct_module_dependencies:
+    # Add ALL module dependency .ifc files as inputs (including transitive dependencies)
+    # This is necessary for Bazel to correctly detect when transitive dependencies change
+    # and trigger recompilation. Only direct dependencies are used for compilation flags,
+    # but all transitive dependencies must be included as inputs for change detection.
+    for module_dep in module_compilation_infos:
         direct_inputs.append(module_dep.ifc_file)
     
     # Always include current target headers as they may be needed by module interfaces
